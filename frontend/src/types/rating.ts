@@ -1,21 +1,54 @@
+import type { LinkageStatus } from './waterLevel'
+
 /** 水位流量关系点据：参与幂函数定线的实测点 */
 export interface Rating {
   id: string
   /** 所属测站 */
   stationId: string
-  /** 水位（m） */
-  stageM: number
+  /** 点据水位（m）；待水位站补录过程段时允许为空并暂不参与定线 */
+  stageM: number | null
   /** 流量（m³/s） */
   flowM3s: number
   /** 定线号：同一定线号的点据参与同一组拟合 */
   lineNo: string
   /** 点据来源测次号 */
   measureNo: string
-  /** 点据时间 */
+  /** 点据时间（取测流开始时刻） */
   measuredAt: string
+  /** 巡测队断面测次 id；手工点据为空 */
+  sectionId?: string | null
+  /** 挂接的水位过程段 id；待挂接时为空 */
+  segmentId?: string | null
+  /** linked：水位过程挂接；pending：等待水位站补录；manual：手工历史点据 */
+  linkageStatus?: LinkageStatus
+  /** 最近一次取水位时间 */
+  stageTakenAt?: string | null
+  /** 最近一次挂接失败说明 */
+  linkageMessage?: string
   createdAt: number
   updatedAt: number
 }
+
+/** 已经定案并留存的定线版本；补录水位或刷新点据不会覆盖它 */
+export interface RatingVersion {
+  id: string
+  lineNo: string
+  a: number
+  b: number
+  h0: number
+  sampleCount: number
+  meanResidualPct: number
+  maxResidualPct: number
+  r2: number
+  valid: boolean
+  message: string
+  finalizedAt: string
+  operator: string
+  createdAt: number
+  updatedAt: number
+}
+
+export type { LinkageStatus }
 
 /** 幂函数定线结果：Q = a * (H - H0)^b */
 export interface RatingFitResult {

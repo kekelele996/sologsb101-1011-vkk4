@@ -2,7 +2,7 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 
 /**
  * 路由表：路径与提示词逐字一致。
- * /stations、/stations/:id/sections、/sections/:id/verticals、/verticals/:id/points、/ratings、/export
+ * /stations、/water-levels、/stations/:id/sections、/sections/:id/verticals、/verticals/:id/points、/ratings、/export
  * 全部页面懒加载，构建时自动分包。
  */
 const routes: RouteRecordRaw[] = [
@@ -12,6 +12,12 @@ const routes: RouteRecordRaw[] = [
     name: 'station-list',
     component: () => import('@/pages/StationList.vue'),
     meta: { title: '测站台账', icon: 'Odometer' }
+  },
+  {
+    path: '/water-levels',
+    name: 'water-level-segments',
+    component: () => import('@/pages/WaterLevelSegments.vue'),
+    meta: { title: '自记水位过程', icon: 'Odometer' }
   },
   {
     path: '/stations/:id/sections',

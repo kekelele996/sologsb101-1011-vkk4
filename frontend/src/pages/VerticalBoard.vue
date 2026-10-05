@@ -38,6 +38,7 @@ const form = reactive({
 })
 
 const verticals = computed(() => sectionStore.verticalsOfSection(sectionId.value))
+const linkedStage = computed(() => (section.value ? sectionStore.stageOfSection(section.value) : null))
 const conflicts = computed(() => (section.value ? sectionStore.findDistanceConflicts(sectionId.value) : []))
 
 /** 每条垂线的平均流速（按测点权重加权）与单宽流量 */
@@ -210,7 +211,10 @@ onMounted(() => {
           <h2 class="page__title">
             测次 {{ section.measureNo }} · 垂线布设与测深
             <el-tag size="small" effect="plain">{{ section.method }}</el-tag>
-            <el-tag size="small" type="info" effect="plain">水位 {{ section.stageM.toFixed(2) }} m</el-tag>
+            <el-tag size="small" type="info" effect="plain">
+              {{ linkedStage === null ? '水位待补录' : `挂接水位 ${linkedStage.toFixed(2)} m` }}
+            </el-tag>
+            <el-tag size="small" type="success" effect="plain">实测流量 {{ section.measuredFlowM3s.toFixed(1) }} m³/s</el-tag>
           </h2>
           <p class="gb-hint">
             录入起点距与水深，测点数决定按相对水深自动生成的测点行（1/2/3/5 点法有预设分布）。垂线按起点距升序参与流量计算。

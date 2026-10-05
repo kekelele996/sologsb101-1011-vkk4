@@ -77,8 +77,8 @@ export function useRatingFit(initialLineNo = 'A'): UseRatingFitResult {
   const allFits = computed<RatingFitResult[]>(() =>
     lineNos.value.map((lineNo) => {
       const points = ratings.value
-        .filter((rating) => rating.lineNo === lineNo)
-        .map((rating) => ({ stageM: rating.stageM, flowM3s: rating.flowM3s }))
+        .filter((rating) => rating.lineNo === lineNo && rating.stageM !== null)
+        .map((rating) => ({ stageM: rating.stageM ?? 0, flowM3s: rating.flowM3s }))
       return fitPowerCurve(points, lineNo)
     })
   )
@@ -93,9 +93,14 @@ export function useRatingFit(initialLineNo = 'A'): UseRatingFitResult {
     const current = fit.value
     return ratings.value
       .filter((rating) => rating.lineNo === activeLineNo.value)
-      .sort((a, b) => a.stageM - b.stageM)
+      .sort((a, b) => {
+        if (a.stageM === null && b.stageM === null) return 0
+        if (a.stageM === null) return 1
+        if (b.stageM === null) return -1
+        return a.stageM - b.stageM
+      })
       .map((rating) => {
-        const predicted = current.valid ? curveFlow(current, rating.stageM) : 0
+        const predicted = current.valid && rating.stageM !== null ? curveFlow(current, rating.stageM) : 0
         const residualPct =
           current.valid && rating.flowM3s > 0
             ? Number((((rating.flowM3s - predicted) / rating.flowM3s) * 100).toFixed(2))
@@ -113,8 +118,8 @@ export function useRatingFit(initialLineNo = 'A'): UseRatingFitResult {
   const curveSamples = computed<CurveSample[]>(() => {
     const current = fit.value
     const rows = pointRows.value
-    if (!current.valid || rows.length === 0) return []
-    const stages = rows.map((row) => row.rating.stageM)
+    const stages = rows.map((row) => row.rating.stageM).filter((stage): stage is number => stage !== null)
+    if (!current.valid || rows.length === 0 || stages.length === 0) return []
     const min = Math.min(...stages)
     const max = Math.max(...stages)
     const step = (max - min) / 12 || 0.1
@@ -128,9 +133,9 @@ export function useRatingFit(initialLineNo = 'A'): UseRatingFitResult {
     const limit = ratingStore.deviationLimitPct
     return allFits.value.flatMap((item) =>
       ratings.value
-        .filter((rating) => rating.lineNo === item.lineNo)
+        .filter((rating) => rating.lineNo === item.lineNo && rating.stageM !== null)
         .map((rating) => {
-          const predicted = item.valid ? curveFlow(item, rating.stageM) : 0
+          const predicted = item.valid ? curveFlow(item, rating.stageM ?? 0) : 0
           const residualPct =
             item.valid && rating.flowM3s > 0
               ? Number((((rating.flowM3s - predicted) / rating.flowM3s) * 100).toFixed(2))
@@ -157,8 +162,8 @@ export function useRatingFit(initialLineNo = 'A'): UseRatingFitResult {
 
   function refit(): RatingFitResult {
     const points = ratings.value
-      .filter((rating) => rating.lineNo === activeLineNo.value)
-      .map((rating) => ({ stageM: rating.stageM, flowM3s: rating.flowM3s }))
+      .filter((rating) => rating.lineNo === activeLineNo.value && rating.stageM !== null)
+      .map((rating) => ({ stageM: rating.stageM ?? 0, flowM3s: rating.flowM3s }))
     const result = fitPowerCurve(points, activeLineNo.value)
     ratingStore.setFit(result)
     return result

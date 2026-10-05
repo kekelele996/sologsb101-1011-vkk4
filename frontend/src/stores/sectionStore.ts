@@ -10,6 +10,9 @@ import { createEmptySectionFilter, type SectionFilterState } from '@/types/secti
 import type { Vertical } from '@/types/vertical'
 import { buildRelativeDepths } from '@/types/vertical'
 import type { Point } from '@/types/point'
+import type { Rating } from '@/types/rating'
+import type { LinkageStatus } from '@/types/waterLevel'
+import { useLinkageStore } from '@/stores/linkageStore'
 
 /** 垂线录入草稿（新增/编辑表单共享结构） */
 export interface VerticalDraft {
@@ -41,6 +44,7 @@ export const useSectionStore = defineStore('section', () => {
   const sections = ref<Section[]>([])
   const verticals = ref<Vertical[]>([])
   const points = ref<Point[]>([])
+  const ratings = ref<Rating[]>([])
   const ready = ref(false)
   const error = ref<string | null>(null)
   const currentSectionId = ref<string | null>(null)
@@ -67,14 +71,36 @@ export const useSectionStore = defineStore('section', () => {
     watchTable<Point>(() => db.points).subscribe((rows) => {
       points.value = rows
     })
+    watchTable<Rating>(() => db.ratings).subscribe((rows) => {
+      ratings.value = rows
+    })
   }
 
-  /** 某测站下的断面测次（按测流时间倒序） */
+  const sectionTime = (section: Section): number =>
+    Date.parse(section.measureStartAt ?? section.measuredAt ?? '')
+
+  /** 某测站下的断面测次（按测流开始时间倒序） */
   function sectionsOfStation(stationId: string | null | undefined): Section[] {
     if (!stationId) return []
     return sections.value
       .filter((section) => section.stationId === stationId)
-      .sort((a, b) => Date.parse(b.measuredAt) - Date.parse(a.measuredAt))
+      .sort((a, b) => sectionTime(b) - sectionTime(a))
+  }
+
+  function ratingOfSection(sectionId: string | null | undefined): Rating | null {
+    if (!sectionId) return null
+    return ratings.value.find((rating) => rating.sectionId === sectionId) ?? null
+  }
+
+  /** 点据水位来自挂接的水位过程段；待挂接或历史手工点据分别返回 null / 旧水位 */
+  function stageOfSection(section: Section): number | null {
+    const rating = ratingOfSection(section.id)
+    if (rating) return rating.stageM
+    return typeof section.stageM === 'number' ? section.stageM : null
+  }
+
+  function linkageStatusOfSection(section: Section): LinkageStatus {
+    return ratingOfSection(section.id)?.linkageStatus ?? section.linkageStatus ?? 'manual'
   }
 
   /** 按筛选条件过滤某测站的断面 */
@@ -88,10 +114,11 @@ export const useSectionStore = defineStore('section', () => {
           if (!haystack.includes(keyword)) return false
         }
         if (filter.value.methods.length > 0 && !filter.value.methods.includes(section.method)) return false
-        if (filter.value.minStageM !== null && section.stageM < filter.value.minStageM) return false
+        const linkedStage = stageOfSection(section)
+        if (filter.value.minStageM !== null && (linkedStage === null || linkedStage < filter.value.minStageM)) return false
         return true
       })
-      .sort((a, b) => Date.parse(b.measuredAt) - Date.parse(a.measuredAt))
+      .sort((a, b) => sectionTime(b) - sectionTime(a))
   )
 
   const sectionById = (id: string | null | undefined): Section | null =>
@@ -184,22 +211,37 @@ export const useSectionStore = defineStore('section', () => {
     const now = Date.now()
     const row: Section = { ...payload, id: createId('sec'), createdAt: now, updatedAt: now }
     await db.sections.put(row)
+    await useLinkageStore().reconcileSection(row)
     return row
   }
 
   async function updateSection(id: string, patch: Partial<Section>): Promise<void> {
-    await db.sections.update(id, { ...patch, updatedAt: Date.now() } as never)
+    const now = Date.now()
+    await db.sections.update(id, { ...patch, updatedAt: now } as never)
+    const updated = await db.sections.get(id)
+    if (updated && updated.linkageStatus !== 'manual') {
+      await useLinkageStore().reconcileSection(updated)
+    }
   }
 
   async function removeSection(id: string): Promise<void> {
-    await db.transaction('rw', [db.sections, db.verticals, db.points], async () => {
-      const verticalIds = (await db.verticals.where('sectionId').equals(id).toArray()).map((row) => row.id)
-      if (verticalIds.length > 0) {
-        await db.points.where('verticalId').anyOf(verticalIds).delete()
-        await db.verticals.bulkDelete(verticalIds)
+    await db.transaction(
+      'rw',
+      [db.sections, db.verticals, db.points, db.ratings, db.compares],
+      async () => {
+        const verticalIds = (await db.verticals.where('sectionId').equals(id).toArray()).map((row) => row.id)
+        const ratingIds = (await db.ratings.where('sectionId').equals(id).toArray()).map((row) => row.id)
+        if (verticalIds.length > 0) {
+          await db.points.where('verticalId').anyOf(verticalIds).delete()
+          await db.verticals.bulkDelete(verticalIds)
+        }
+        if (ratingIds.length > 0) {
+          await db.compares.where('ratingId').anyOf(ratingIds).delete()
+          await db.ratings.bulkDelete(ratingIds)
+        }
+        await db.sections.delete(id)
       }
-      await db.sections.delete(id)
-    })
+    )
   }
 
   /* ------------------------------- 垂线 ------------------------------- */
@@ -342,6 +384,7 @@ export const useSectionStore = defineStore('section', () => {
     sections,
     verticals,
     points,
+    ratings,
     ready,
     error,
     currentSectionId,
@@ -355,6 +398,9 @@ export const useSectionStore = defineStore('section', () => {
     start,
     sectionsOfStation,
     sectionById,
+    ratingOfSection,
+    stageOfSection,
+    linkageStatusOfSection,
     verticalsOfSection,
     pointsOfVertical,
     verticalStats,

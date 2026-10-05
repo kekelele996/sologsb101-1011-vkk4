@@ -13,7 +13,16 @@ import {
 } from '@/utils/db'
 
 /** 备份集合键名 */
-export const BACKUP_KEYS = ['stations', 'sections', 'verticals', 'points', 'ratings', 'compares'] as const
+export const BACKUP_KEYS = [
+  'stations',
+  'waterLevelSegments',
+  'sections',
+  'verticals',
+  'points',
+  'ratings',
+  'ratingVersions',
+  'compares'
+] as const
 export type BackupKey = (typeof BACKUP_KEYS)[number]
 
 /** 各表行数统计（导出页展示与导入结果回执共用） */
@@ -21,23 +30,28 @@ export type CountMap = Record<BackupKey, number>
 
 /** 组装当前本地数据的完整快照 */
 export async function buildBackupPayload(): Promise<BackupPayload> {
-  const [stations, sections, verticals, points, ratings, compares] = await Promise.all([
-    db.stations.toArray(),
-    db.sections.toArray(),
-    db.verticals.toArray(),
-    db.points.toArray(),
-    db.ratings.toArray(),
-    db.compares.toArray()
-  ])
+  const [stations, waterLevelSegments, sections, verticals, points, ratings, ratingVersions, compares] =
+    await Promise.all([
+      db.stations.toArray(),
+      db.waterLevelSegments.toArray(),
+      db.sections.toArray(),
+      db.verticals.toArray(),
+      db.points.toArray(),
+      db.ratings.toArray(),
+      db.ratingVersions.toArray(),
+      db.compares.toArray()
+    ])
   return {
     app: 'gbhydrogaug',
     dbVersion: DB_VERSION,
     exportedAt: new Date().toISOString(),
     stations,
+    waterLevelSegments,
     sections,
     verticals,
     points,
     ratings,
+    ratingVersions,
     compares
   }
 }
@@ -52,19 +66,47 @@ export function validateBackup(input: unknown): { ok: boolean; errors: string[];
   if (obj.app !== 'gbhydrogaug' && obj.app !== undefined) {
     errors.push('app 字段应为 gbhydrogaug，文件来源不明')
   }
-  for (const key of BACKUP_KEYS) {
+  const requiredKeys = ['stations', 'sections', 'verticals', 'points', 'ratings', 'compares'] as const
+  for (const key of requiredKeys) {
     if (!Array.isArray(obj[key])) errors.push(`${key} 字段缺失或不是数组`)
   }
   if (errors.length > 0) return { ok: false, errors, payload: null }
+  const ratings = Array.isArray(obj.ratings) ? (obj.ratings as BackupPayload['ratings']) : []
+  const sections = (Array.isArray(obj.sections) ? (obj.sections as BackupPayload['sections']) : []).map((section) => {
+    const measuredAt = section.measureStartAt ?? section.measuredAt ?? new Date().toISOString()
+    const linkedRating = ratings.find((rating) => rating.measureNo === section.measureNo && rating.stationId === section.stationId)
+    return {
+      ...section,
+      stageM: typeof section.stageM === 'number' ? section.stageM : null,
+      measuredFlowM3s: section.measuredFlowM3s ?? linkedRating?.flowM3s ?? 0,
+      lineNo: section.lineNo ?? linkedRating?.lineNo ?? 'A',
+      linkageStatus: section.linkageStatus ?? 'manual',
+      linkageMessage: section.linkageMessage ?? '旧备份导入的历史测次沿用旧台账水位',
+      linkedAt: section.linkedAt ?? null,
+      measureStartAt: measuredAt,
+      measureEndAt: section.measureEndAt ?? measuredAt
+    }
+  })
+  const normalizedRatings = ratings.map((rating) => ({
+    ...rating,
+    stageM: typeof rating.stageM === 'number' ? rating.stageM : null,
+    sectionId: rating.sectionId ?? null,
+    segmentId: rating.segmentId ?? null,
+    linkageStatus: rating.linkageStatus ?? 'manual',
+    stageTakenAt: rating.stageTakenAt ?? null,
+    linkageMessage: rating.linkageMessage ?? '旧备份导入的历史点据沿用旧台账水位'
+  }))
   const payload: BackupPayload = {
     app: 'gbhydrogaug',
     dbVersion: typeof obj.dbVersion === 'number' ? obj.dbVersion : DB_VERSION,
     exportedAt: typeof obj.exportedAt === 'string' ? obj.exportedAt : new Date().toISOString(),
     stations: obj.stations ?? [],
-    sections: obj.sections ?? [],
+    waterLevelSegments: obj.waterLevelSegments ?? [],
+    sections,
     verticals: obj.verticals ?? [],
     points: obj.points ?? [],
-    ratings: obj.ratings ?? [],
+    ratings: normalizedRatings,
+    ratingVersions: obj.ratingVersions ?? [],
     compares: obj.compares ?? []
   }
   return { ok: true, errors, payload }
@@ -74,10 +116,12 @@ export function validateBackup(input: unknown): { ok: boolean; errors: string[];
 export function countPayload(payload: BackupPayload): CountMap {
   return {
     stations: payload.stations.length,
+    waterLevelSegments: payload.waterLevelSegments.length,
     sections: payload.sections.length,
     verticals: payload.verticals.length,
     points: payload.points.length,
     ratings: payload.ratings.length,
+    ratingVersions: payload.ratingVersions.length,
     compares: payload.compares.length
   }
 }
@@ -116,13 +160,24 @@ export async function importBackup(payload: BackupPayload, overwrite: boolean): 
   if (overwrite) await clearAllTables()
   await db.transaction(
     'rw',
-    [db.stations, db.sections, db.verticals, db.points, db.ratings, db.compares],
+    [
+      db.stations,
+      db.waterLevelSegments,
+      db.sections,
+      db.verticals,
+      db.points,
+      db.ratings,
+      db.ratingVersions,
+      db.compares
+    ],
     async () => {
       await db.stations.bulkPut(payload.stations)
+      await db.waterLevelSegments.bulkPut(payload.waterLevelSegments)
       await db.sections.bulkPut(payload.sections)
       await db.verticals.bulkPut(payload.verticals)
       await db.points.bulkPut(payload.points)
       await db.ratings.bulkPut(payload.ratings)
+      await db.ratingVersions.bulkPut(payload.ratingVersions)
       await db.compares.bulkPut(payload.compares)
     }
   )
@@ -132,6 +187,7 @@ export async function importBackup(payload: BackupPayload, overwrite: boolean): 
 /** 追加式导入：为导入数据重新分配 id，避免覆盖现有档案 */
 export function remapIds(payload: BackupPayload): BackupPayload {
   const stationMap = new Map<string, string>()
+  const segmentMap = new Map<string, string>()
   const sectionMap = new Map<string, string>()
   const verticalMap = new Map<string, string>()
   const ratingMap = new Map<string, string>()
@@ -140,6 +196,11 @@ export function remapIds(payload: BackupPayload): BackupPayload {
     const id = createId('stn')
     stationMap.set(station.id, id)
     return { ...station, id }
+  })
+  const waterLevelSegments = payload.waterLevelSegments.map((segment) => {
+    const id = createId('wls')
+    segmentMap.set(segment.id, id)
+    return { ...segment, id, stationId: stationMap.get(segment.stationId) ?? segment.stationId }
   })
   const sections = payload.sections.map((section) => {
     const id = createId('sec')
@@ -159,14 +220,34 @@ export function remapIds(payload: BackupPayload): BackupPayload {
   const ratings = payload.ratings.map((rating) => {
     const id = createId('rat')
     ratingMap.set(rating.id, id)
-    return { ...rating, id, stationId: stationMap.get(rating.stationId) ?? rating.stationId }
+    return {
+      ...rating,
+      id,
+      stationId: stationMap.get(rating.stationId) ?? rating.stationId,
+      sectionId: rating.sectionId ? (sectionMap.get(rating.sectionId) ?? rating.sectionId) : rating.sectionId,
+      segmentId: rating.segmentId ? (segmentMap.get(rating.segmentId) ?? rating.segmentId) : rating.segmentId
+    }
   })
+  const ratingVersions = payload.ratingVersions.map((version) => ({
+    ...version,
+    id: createId('rv')
+  }))
   const compares = payload.compares.map((compare) => ({
     ...compare,
     id: createId('cmp'),
     ratingId: ratingMap.get(compare.ratingId) ?? compare.ratingId
   }))
-  return { ...payload, stations, sections, verticals, points, ratings, compares }
+  return {
+    ...payload,
+    stations,
+    waterLevelSegments,
+    sections,
+    verticals,
+    points,
+    ratings,
+    ratingVersions,
+    compares
+  }
 }
 
 /**
@@ -190,9 +271,13 @@ export function buildConclusionLines(
 ): ConclusionLine[] {
   return payload.stations.map((station) => {
     const sections = payload.sections.filter((section) => section.stationId === station.id)
+    const linkedRatingBySection = new Map(
+      payload.ratings.map((rating) => [rating.sectionId, rating] as const)
+    )
     const latest = sections.reduce<number | null>((acc, section) => {
-      if (acc === null) return section.stageM
-      return section.stageM > acc ? section.stageM : acc
+      const linkedStage = linkedRatingBySection.get(section.id)?.stageM ?? section.stageM ?? null
+      if (acc === null) return linkedStage
+      return linkedStage !== null && linkedStage > acc ? linkedStage : acc
     }, null)
     const ratings = payload.ratings.filter((rating) => rating.stationId === station.id)
     const ratingIds = new Set(ratings.map((rating) => rating.id))

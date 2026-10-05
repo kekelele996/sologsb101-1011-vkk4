@@ -12,7 +12,7 @@ const props = withDefaults(
     /** 偏差百分比，正负均可 */
     deviationPct: number
     /** 判定结论；不传时按限值自动判定 */
-    verdict?: '合格' | '超限'
+    verdict?: string
     /** 允许偏差限值（%），默认取常量 8% */
     limit?: number
     /** 是否显示偏差数值 */

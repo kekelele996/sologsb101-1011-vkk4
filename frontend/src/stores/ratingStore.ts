@@ -7,13 +7,14 @@ import { computed, ref } from 'vue'
 import { db, createId, watchTable } from '@/utils/db'
 import type { Compare } from '@/types/compare'
 import { DEVIATION_LIMIT_PCT, calcDeviationPct, judgeDeviation, type CompareRow } from '@/types/compare'
-import type { Rating, RatingFitResult } from '@/types/rating'
+import type { Rating, RatingFitResult, RatingVersion } from '@/types/rating'
 import { createEmptyRatingFilter, curveFlow, fitPowerCurve, type RatingFilterState } from '@/types/rating'
 import type { Station } from '@/types/station'
 
 export const useRatingStore = defineStore('rating', () => {
   const ratings = ref<Rating[]>([])
   const compares = ref<Compare[]>([])
+  const versions = ref<RatingVersion[]>([])
   const stations = ref<Station[]>([])
   const ready = ref(false)
   const error = ref<string | null>(null)
@@ -36,6 +37,9 @@ export const useRatingStore = defineStore('rating', () => {
     watchTable<Compare>(() => db.compares).subscribe((rows) => {
       compares.value = rows
     })
+    watchTable<RatingVersion>(() => db.ratingVersions).subscribe((rows) => {
+      versions.value = rows
+    })
     watchTable<Station>(() => db.stations).subscribe((rows) => {
       stations.value = rows
     })
@@ -54,29 +58,56 @@ export const useRatingStore = defineStore('rating', () => {
   const allFits = computed<RatingFitResult[]>(() =>
     lineNos.value.map((lineNo) => {
       const points = ratings.value
-        .filter((rating) => rating.lineNo === lineNo)
-        .map((rating) => ({ stageM: rating.stageM, flowM3s: rating.flowM3s }))
+        .filter((rating) => rating.lineNo === lineNo && rating.stageM !== null)
+        .map((rating) => ({ stageM: rating.stageM ?? 0, flowM3s: rating.flowM3s }))
       return fitPowerCurve(points, lineNo)
     })
   )
 
-  const activeFit = computed<RatingFitResult>(() => {
-    const cached = fits.value.find((fit) => fit.lineNo === activeLineNo.value)
-    if (cached) return cached
-    const computedFit = allFits.value.find((fit) => fit.lineNo === activeLineNo.value)
-    if (computedFit) return computedFit
-    return fitPowerCurve([], activeLineNo.value)
+  /** 当前未定案的试算定线（随点据与补录水位实时重算，不覆盖定案版本） */
+  const draftFit = computed<RatingFitResult>(
+    () => allFits.value.find((fit) => fit.lineNo === activeLineNo.value) ?? fitPowerCurve([], activeLineNo.value)
+  )
+
+  /** 已定案的最新版本；补录水位、刷新点据或再次试算均不会覆盖它 */
+  const finalizedFit = computed<RatingFitResult | null>(() => {
+    const version = versions.value
+      .filter((item) => item.lineNo === activeLineNo.value)
+      .sort((a, b) => b.createdAt - a.createdAt)[0]
+    if (!version) return null
+    return {
+      lineNo: version.lineNo,
+      a: version.a,
+      b: version.b,
+      h0: version.h0,
+      sampleCount: version.sampleCount,
+      meanResidualPct: version.meanResidualPct,
+      maxResidualPct: version.maxResidualPct,
+      r2: version.r2,
+      valid: version.valid,
+      message: version.message
+    }
   })
 
-  /** 点据 + 曲线流量 + 残差 */
+  const activeFit = computed<RatingFitResult>(() => finalizedFit.value ?? draftFit.value)
+
+  /** 点据 + 曲线流量 + 残差；待挂接点据水位为空，排在最后且不参与定线 */
   const pointRows = computed(() =>
     ratings.value
       .filter((rating) => rating.lineNo === activeLineNo.value)
-      .sort((a, b) => a.stageM - b.stageM)
+      .sort((a, b) => {
+        if (a.stageM === null && b.stageM === null) return Date.parse(a.measuredAt) - Date.parse(b.measuredAt)
+        if (a.stageM === null) return 1
+        if (b.stageM === null) return -1
+        return a.stageM - b.stageM
+      })
       .map((rating) => {
-        const predicted = activeFit.value.valid ? curveFlow(activeFit.value, rating.stageM) : 0
+        const useFinalCurve = finalizedFit.value?.valid === true
+        const curveFit = useFinalCurve ? finalizedFit.value : draftFit.value
+        const predicted =
+          curveFit.valid && rating.stageM !== null ? curveFlow(curveFit, rating.stageM) : 0
         const residualPct =
-          activeFit.value.valid && rating.flowM3s > 0
+          curveFit.valid && rating.stageM !== null && rating.flowM3s > 0
             ? Number((((rating.flowM3s - predicted) / rating.flowM3s) * 100).toFixed(2))
             : 0
         return { rating, predicted, residualPct }
@@ -170,7 +201,16 @@ export const useRatingStore = defineStore('rating', () => {
     payload: Omit<Rating, 'id' | 'createdAt' | 'updatedAt'>
   ): Promise<Rating> {
     const now = Date.now()
-    const row: Rating = { ...payload, id: createId('rat'), createdAt: now, updatedAt: now }
+    const row: Rating = {
+      sectionId: null,
+      segmentId: null,
+      linkageStatus: 'manual',
+      stageTakenAt: null,
+      ...payload,
+      id: createId('rat'),
+      createdAt: now,
+      updatedAt: now
+    }
     await db.ratings.put(row)
     return row
   }
@@ -187,23 +227,32 @@ export const useRatingStore = defineStore('rating', () => {
   }
 
   /**
-   * 由点据生成 / 刷新比测记录：曲线流量取当前定线拟合值，
-   * 偏差超过限值自动判定超限并进入分析清单。
+   * 刷新比测记录：曲线流量默认采用已定案版本；尚无定案版本时使用当前试算。
+   * 待挂接点据（水位为空）不生成比测，也不影响已定案版本。
    */
   async function rebuildCompares(lineNo?: string): Promise<number> {
     const targetLine = lineNo ?? activeLineNo.value
-    const fit = fitPowerCurve(
+    const draft = fitPowerCurve(
       ratings.value
-        .filter((rating) => rating.lineNo === targetLine)
-        .map((rating) => ({ stageM: rating.stageM, flowM3s: rating.flowM3s })),
+        .filter((rating) => rating.lineNo === targetLine && rating.stageM !== null)
+        .map((rating) => ({ stageM: rating.stageM ?? 0, flowM3s: rating.flowM3s })),
       targetLine
     )
-    setFit(fit)
-    const targets = ratings.value.filter((rating) => rating.lineNo === targetLine)
+    setFit(draft)
+    const fit = finalizedVersionOfLine(targetLine) ?? draft
+    const lineRatings = ratings.value.filter((rating) => rating.lineNo === targetLine)
+    const targets = lineRatings.filter((rating) => rating.stageM !== null)
+    const pendingRatings = lineRatings.filter((rating) => rating.stageM === null)
+    if (pendingRatings.length > 0) {
+      await db.compares
+        .where('ratingId')
+        .anyOf(pendingRatings.map((rating) => rating.id))
+        .delete()
+    }
     if (targets.length === 0) return 0
     const now = Date.now()
     const rows: Compare[] = targets.map((rating) => {
-      const predicted = fit.valid ? curveFlow(fit, rating.stageM) : rating.flowM3s
+      const predicted = fit.valid && rating.stageM !== null ? curveFlow(fit, rating.stageM) : rating.flowM3s
       const deviationPct = calcDeviationPct(rating.flowM3s, predicted)
       const existing = compares.value.find((item) => item.ratingId === rating.id)
       return {
@@ -221,6 +270,56 @@ export const useRatingStore = defineStore('rating', () => {
     })
     await db.compares.bulkPut(rows)
     return rows.length
+  }
+
+  function finalizedVersionOfLine(lineNo: string): RatingFitResult | null {
+    if (lineNo === activeLineNo.value && finalizedFit.value) return finalizedFit.value
+    const version = versions.value
+      .filter((item) => item.lineNo === lineNo)
+      .sort((a, b) => b.createdAt - a.createdAt)[0]
+    if (!version) return null
+    return {
+      lineNo: version.lineNo,
+      a: version.a,
+      b: version.b,
+      h0: version.h0,
+      sampleCount: version.sampleCount,
+      meanResidualPct: version.meanResidualPct,
+      maxResidualPct: version.maxResidualPct,
+      r2: version.r2,
+      valid: version.valid,
+      message: version.message
+    }
+  }
+
+  /** 将当前试算定线保存为不可覆盖的定案版本，旧版本原样留存。 */
+  async function finalizeCurrentFit(operator = '整编岗'): Promise<RatingVersion> {
+    const fit = draftFit.value
+    const now = Date.now()
+    const version: RatingVersion = {
+      id: createId('rv'),
+      lineNo: fit.lineNo,
+      a: fit.a,
+      b: fit.b,
+      h0: fit.h0,
+      sampleCount: fit.sampleCount,
+      meanResidualPct: fit.meanResidualPct,
+      maxResidualPct: fit.maxResidualPct,
+      r2: fit.r2,
+      valid: fit.valid,
+      message: fit.message,
+      finalizedAt: new Date(now).toISOString(),
+      operator,
+      createdAt: now,
+      updatedAt: now
+    }
+    await db.ratingVersions.put(version)
+    await rebuildCompares(fit.lineNo)
+    return version
+  }
+
+  async function removeRatingVersion(id: string): Promise<void> {
+    await db.ratingVersions.delete(id)
   }
 
   /** 手工登记比测记录（导出页分析清单用） */
@@ -256,11 +355,14 @@ export const useRatingStore = defineStore('rating', () => {
   return {
     ratings,
     compares,
+    versions,
     stations,
     ready,
     error,
     filter,
     activeLineNo,
+    draftFit,
+    finalizedFit,
     activeFit,
     fits,
     deviationLimitPct,
@@ -278,6 +380,8 @@ export const useRatingStore = defineStore('rating', () => {
     resetFilter,
     setActiveLine,
     setFit,
+    finalizeCurrentFit,
+    removeRatingVersion,
     setDeviationLimit,
     createRating,
     updateRating,

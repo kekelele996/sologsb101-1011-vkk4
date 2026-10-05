@@ -74,8 +74,8 @@ async function buildConclusions(): Promise<void> {
   const fits = ratingStore.lineNos.map((lineNo) =>
     fitPowerCurve(
       payload.ratings
-        .filter((rating) => rating.lineNo === lineNo)
-        .map((rating) => ({ stageM: rating.stageM, flowM3s: rating.flowM3s })),
+        .filter((rating) => rating.lineNo === lineNo && rating.stageM !== null)
+        .map((rating) => ({ stageM: rating.stageM ?? 0, flowM3s: rating.flowM3s })),
       lineNo
     )
   )
@@ -135,7 +135,7 @@ async function handleImport(): Promise<void> {
 async function handleReset(): Promise<void> {
   try {
     await ElMessageBox.confirm(
-      '将清空全部本地数据并重新播种演示数据（测站、断面、垂线、测点、点据、比测）。确认继续？',
+      '将清空全部本地数据并重新播种演示数据（测站、水位过程段、断面测次、垂线、测点、点据、定案版本、比测）。确认继续？',
       '重置本地数据',
       { type: 'warning', confirmButtonText: '清空并重建', cancelButtonText: '取消' }
     )
@@ -179,8 +179,10 @@ onMounted(() => {
 
     <div class="gb-stats-row">
       <StatBadge label="测站" :value="counts.stations ?? 0" suffix="站" icon="Odometer" />
+      <StatBadge label="水位过程段" :value="counts.waterLevelSegments ?? 0" suffix="段" icon="Odometer" />
       <StatBadge label="断面测次" :value="counts.sections ?? 0" suffix="次" icon="Files" tone="info" />
       <StatBadge label="流速测点" :value="counts.points ?? 0" suffix="点" icon="DataLine" tone="success" />
+      <StatBadge label="定案版本" :value="counts.ratingVersions ?? 0" suffix="版" icon="PieChart" tone="info" />
       <StatBadge
         label="比测合格率"
         :value="ratingStore.fitQuality.qualifyRatePct"
@@ -290,7 +292,7 @@ onMounted(() => {
       <div class="gb-panel-title">
         <h3>全量 JSON 导入导出</h3>
         <span class="gb-hint">
-          导出内容包含 stations / sections / verticals / points / ratings / compares 六张表
+          导出内容包含 stations / waterLevelSegments / sections / verticals / points / ratings / ratingVersions / compares 八张表
         </span>
       </div>
 
@@ -325,14 +327,14 @@ onMounted(() => {
       <el-descriptions :column="3" border size="small">
         <el-descriptions-item label="本地库名">{{ DB_NAME }}</el-descriptions-item>
         <el-descriptions-item label="结构版本">v{{ DB_VERSION }}</el-descriptions-item>
-        <el-descriptions-item label="测站 / 测次">
-          {{ counts.stations ?? 0 }} / {{ counts.sections ?? 0 }}
+        <el-descriptions-item label="水位段 / 测次">
+          {{ counts.waterLevelSegments ?? 0 }} / {{ counts.sections ?? 0 }}
         </el-descriptions-item>
         <el-descriptions-item label="垂线 / 测点">
           {{ counts.verticals ?? 0 }} / {{ counts.points ?? 0 }}
         </el-descriptions-item>
-        <el-descriptions-item label="点据 / 比测">
-          {{ counts.ratings ?? 0 }} / {{ counts.compares ?? 0 }}
+        <el-descriptions-item label="点据 / 定案 / 比测">
+          {{ counts.ratings ?? 0 }} / {{ counts.ratingVersions ?? 0 }} / {{ counts.compares ?? 0 }}
         </el-descriptions-item>
         <el-descriptions-item label="最近备份时间">
           {{ lastBackupAt ? new Date(lastBackupAt).toLocaleString('zh-CN') : '尚未备份' }}

@@ -7,11 +7,13 @@ import { computed, ref } from 'vue'
 import { db, createId, readLastStationId, watchTable, writeLastStationId } from '@/utils/db'
 import type { Station } from '@/types/station'
 import type { Section } from '@/types/section'
+import type { Rating } from '@/types/rating'
 import { createEmptyStationFilter, type StationFilterState } from '@/types/station'
 
 export const useStationStore = defineStore('station', () => {
   const stations = ref<Station[]>([])
   const sections = ref<Section[]>([])
+  const ratings = ref<Rating[]>([])
   const ready = ref(false)
   const error = ref<string | null>(null)
   const currentStationId = ref<string | null>(readLastStationId())
@@ -34,6 +36,9 @@ export const useStationStore = defineStore('station', () => {
     watchTable<Section>(() => db.sections).subscribe((rows) => {
       sections.value = rows
     })
+    watchTable<Rating>(() => db.ratings).subscribe((rows) => {
+      ratings.value = rows
+    })
   }
 
   const currentStation = computed<Station | null>(
@@ -53,11 +58,12 @@ export const useStationStore = defineStore('station', () => {
     sections.value.forEach((section) => {
       const bucket = stats[section.stationId] ?? { count: 0, latestStageM: null, latestMeasuredAt: null }
       bucket.count += 1
-      const time = Date.parse(section.measuredAt)
+      const time = Date.parse(section.measureStartAt ?? section.measuredAt ?? '')
       const lastTime = bucket.latestMeasuredAt ? Date.parse(bucket.latestMeasuredAt) : -Infinity
       if (bucket.latestMeasuredAt === null || time >= lastTime) {
-        bucket.latestStageM = section.stageM
-        bucket.latestMeasuredAt = section.measuredAt
+        const linked = ratings.value.find((rating) => rating.sectionId === section.id)
+        bucket.latestStageM = linked?.stageM ?? section.stageM ?? null
+        bucket.latestMeasuredAt = section.measureStartAt ?? section.measuredAt ?? null
       }
       stats[section.stationId] = bucket
     })
@@ -125,9 +131,19 @@ export const useStationStore = defineStore('station', () => {
   async function removeStation(id: string): Promise<void> {
     await db.transaction(
       'rw',
-      [db.stations, db.sections, db.verticals, db.points, db.ratings, db.compares],
-      async () => {
-        const sectionIds = (await db.sections.where('stationId').equals(id).toArray()).map((row) => row.id)
+        [
+          db.stations,
+          db.waterLevelSegments,
+          db.sections,
+          db.verticals,
+          db.points,
+          db.ratings,
+          db.ratingVersions,
+          db.compares
+        ],
+        async () => {
+          await db.waterLevelSegments.where('stationId').equals(id).delete()
+          const sectionIds = (await db.sections.where('stationId').equals(id).toArray()).map((row) => row.id)
         const verticalIds =
           sectionIds.length > 0
             ? (await db.verticals.where('sectionId').anyOf(sectionIds).toArray()).map((row) => row.id)
