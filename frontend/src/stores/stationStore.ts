@@ -53,11 +53,11 @@ export const useStationStore = defineStore('station', () => {
     sections.value.forEach((section) => {
       const bucket = stats[section.stationId] ?? { count: 0, latestStageM: null, latestMeasuredAt: null }
       bucket.count += 1
-      const time = Date.parse(section.measuredAt)
+      const time = Date.parse(section.startedAt)
       const lastTime = bucket.latestMeasuredAt ? Date.parse(bucket.latestMeasuredAt) : -Infinity
       if (bucket.latestMeasuredAt === null || time >= lastTime) {
-        bucket.latestStageM = section.stageM
-        bucket.latestMeasuredAt = section.measuredAt
+        bucket.latestStageM = section.linkedStageM
+        bucket.latestMeasuredAt = section.startedAt
       }
       stats[section.stationId] = bucket
     })
@@ -125,9 +125,20 @@ export const useStationStore = defineStore('station', () => {
   async function removeStation(id: string): Promise<void> {
     await db.transaction(
       'rw',
-      [db.stations, db.sections, db.verticals, db.points, db.ratings, db.compares],
+      [
+        db.stations,
+        db.stageSegments,
+        db.sections,
+        db.verticals,
+        db.points,
+        db.ratings,
+        db.ratingVersions,
+        db.compares
+      ],
       async () => {
         const sectionIds = (await db.sections.where('stationId').equals(id).toArray()).map((row) => row.id)
+        await db.stageSegments.where('stationId').equals(id).delete()
+        await db.ratingVersions.where('stationId').equals(id).delete()
         const verticalIds =
           sectionIds.length > 0
             ? (await db.verticals.where('sectionId').anyOf(sectionIds).toArray()).map((row) => row.id)

@@ -210,7 +210,12 @@ onMounted(() => {
           <h2 class="page__title">
             测次 {{ section.measureNo }} · 垂线布设与测深
             <el-tag size="small" effect="plain">{{ section.method }}</el-tag>
-            <el-tag size="small" type="info" effect="plain">水位 {{ section.stageM.toFixed(2) }} m</el-tag>
+            <el-tag size="small" type="info" effect="plain">
+              {{ section.linkedStageM === null ? '点据水位待补录' : `点据水位 ${section.linkedStageM.toFixed(2)} m` }}
+            </el-tag>
+            <el-tag size="small" type="success" effect="plain">
+              实测流量 {{ section.measuredFlowM3s === null ? '—' : `${section.measuredFlowM3s.toFixed(1)} m³/s` }}
+            </el-tag>
           </h2>
           <p class="gb-hint">
             录入起点距与水深，测点数决定按相对水深自动生成的测点行（1/2/3/5 点法有预设分布）。垂线按起点距升序参与流量计算。

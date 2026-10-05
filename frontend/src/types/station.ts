@@ -12,6 +12,8 @@ export interface Station {
   catchmentKm2: number
   /** 断面编号，如 CS-01 */
   sectionCode: string
+  /** 巡测断面测次默认归入的定线号 */
+  ratingLineNo: string
   /** 备注 */
   remark: string
   createdAt: number

@@ -5,9 +5,10 @@
  */
 import { computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { DataLine, Files, Histogram, Odometer, PieChart, TrendCharts } from '@element-plus/icons-vue'
+import { DataBoard, DataLine, Files, Histogram, Odometer, PieChart, TrendCharts } from '@element-plus/icons-vue'
 import { useStationStore } from '@/stores/stationStore'
 import { useSectionStore } from '@/stores/sectionStore'
+import { useStageStore } from '@/stores/stageStore'
 import { useRatingStore } from '@/stores/ratingStore'
 import { DB_NAME, DB_VERSION } from '@/utils/db'
 
@@ -15,11 +16,13 @@ const route = useRoute()
 const router = useRouter()
 const stationStore = useStationStore()
 const sectionStore = useSectionStore()
+const stageStore = useStageStore()
 const ratingStore = useRatingStore()
 
 onMounted(() => {
   stationStore.start()
   sectionStore.start()
+  stageStore.start()
   ratingStore.start()
 })
 
@@ -28,11 +31,13 @@ const activeKey = computed(() => {
   if (route.path.startsWith('/stations/')) return '/stations'
   if (route.path.startsWith('/sections/')) return '/stations'
   if (route.path.startsWith('/verticals/')) return '/stations'
+  if (route.path.startsWith('/stage-segments')) return '/stage-segments'
   return route.path
 })
 
 const navItems = computed(() => [
   { key: '/stations', label: '测站台账', icon: Odometer, badge: String(stationStore.stations.length) },
+  { key: '/stage-segments', label: '水位过程段', icon: DataBoard, badge: String(stageStore.stageSegments.length) },
   { key: '/ratings', label: '关系点据与定线', icon: TrendCharts, badge: String(ratingStore.ratings.length) },
   { key: '/export', label: '比测与导出', icon: PieChart, badge: String(ratingStore.overLimitRows.length) }
 ])
@@ -114,9 +119,10 @@ function go(path: string): void {
         本地库 {{ DB_NAME }} · 结构版本 v{{ DB_VERSION }} · 数据仅存于本浏览器 IndexedDB，不上传任何服务器。
       </span>
       <span>
-        测站 {{ stationStore.stations.length }} · 测次 {{ sectionStore.sections.length }} · 垂线
-        {{ sectionStore.verticals.length }} · 测点 {{ sectionStore.points.length }} · 点据
-        {{ ratingStore.ratings.length }}
+        测站 {{ stationStore.stations.length }} · 过程段 {{ stageStore.stageSegments.length }} · 测次
+        {{ sectionStore.sections.length }} · 垂线 {{ sectionStore.verticals.length }} · 测点
+        {{ sectionStore.points.length }} · 点据 {{ ratingStore.ratings.length }} · 定案
+        {{ ratingStore.ratingVersions.length }}
       </span>
     </footer>
   </div>

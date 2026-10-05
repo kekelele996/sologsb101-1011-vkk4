@@ -1,6 +1,6 @@
 /**
- * useRatingFit：水位流量点据拟合、残差与定线状态管理。
- * 被关系点据页与导出页消费；点据数据来自 ratingStore（IndexedDB 实时订阅）。
+ * useRatingFit：水位流量点据拟合、残差与工作定线状态管理。
+ * 只使用已挂接水位的点据；待水位站补录的点据不参与曲线和残差。
  */
 import { computed, ref, type ComputedRef, type Ref } from 'vue'
 import { storeToRefs } from 'pinia'
@@ -23,6 +23,7 @@ export interface CurveSample {
 export interface RatingPointRow {
   rating: Rating
   stationName: string
+  pending: boolean
   /** 曲线流量 */
   curveFlowM3s: number
   /** 相对残差（%）：(实测 - 曲线) / 实测 × 100 */
@@ -41,7 +42,7 @@ export interface UseRatingFitResult {
   fit: ComputedRef<RatingFitResult>
   /** 全部定线的拟合结果 */
   allFits: ComputedRef<RatingFitResult[]>
-  /** 当前定线的点据（含残差） */
+  /** 当前定线的点据（含待挂接点据） */
   pointRows: ComputedRef<RatingPointRow[]>
   /** 当前定线的曲线采样点，用于绘制曲线 */
   curveSamples: ComputedRef<CurveSample[]>
@@ -74,13 +75,13 @@ export function useRatingFit(initialLineNo = 'A'): UseRatingFitResult {
     return station ? station.name : '未知测站'
   }
 
+  const usablePoints = (lineNo: string) =>
+    ratings.value
+      .filter((rating) => rating.lineNo === lineNo && rating.stageM !== null && rating.flowM3s > 0)
+      .map((rating) => ({ stageM: rating.stageM as number, flowM3s: rating.flowM3s }))
+
   const allFits = computed<RatingFitResult[]>(() =>
-    lineNos.value.map((lineNo) => {
-      const points = ratings.value
-        .filter((rating) => rating.lineNo === lineNo)
-        .map((rating) => ({ stageM: rating.stageM, flowM3s: rating.flowM3s }))
-      return fitPowerCurve(points, lineNo)
-    })
+    lineNos.value.map((lineNo) => fitPowerCurve(usablePoints(lineNo), lineNo))
   )
 
   const fit = computed<RatingFitResult>(() => {
@@ -89,32 +90,35 @@ export function useRatingFit(initialLineNo = 'A'): UseRatingFitResult {
     return fitPowerCurve([], activeLineNo.value)
   })
 
-  const pointRows = computed<RatingPointRow[]>(() => {
-    const current = fit.value
-    return ratings.value
+  const toRow = (rating: Rating, current: RatingFitResult): RatingPointRow => {
+    const pending = rating.stageM === null
+    const predicted = !pending && current.valid ? curveFlow(current, rating.stageM as number) : 0
+    const residualPct =
+      !pending && current.valid && rating.flowM3s > 0
+        ? Number((((rating.flowM3s - predicted) / rating.flowM3s) * 100).toFixed(2))
+        : 0
+    return {
+      rating,
+      stationName: stationNameOf(rating.stationId),
+      pending,
+      curveFlowM3s: predicted,
+      residualPct,
+      fit: current
+    }
+  }
+
+  const pointRows = computed<RatingPointRow[]>(() =>
+    ratings.value
       .filter((rating) => rating.lineNo === activeLineNo.value)
-      .sort((a, b) => a.stageM - b.stageM)
-      .map((rating) => {
-        const predicted = current.valid ? curveFlow(current, rating.stageM) : 0
-        const residualPct =
-          current.valid && rating.flowM3s > 0
-            ? Number((((rating.flowM3s - predicted) / rating.flowM3s) * 100).toFixed(2))
-            : 0
-        return {
-          rating,
-          stationName: stationNameOf(rating.stationId),
-          curveFlowM3s: predicted,
-          residualPct,
-          fit: current
-        }
-      })
-  })
+      .sort((a, b) => (a.stageM ?? Number.POSITIVE_INFINITY) - (b.stageM ?? Number.POSITIVE_INFINITY))
+      .map((rating) => toRow(rating, fit.value))
+  )
 
   const curveSamples = computed<CurveSample[]>(() => {
     const current = fit.value
-    const rows = pointRows.value
+    const rows = pointRows.value.filter((row) => !row.pending)
     if (!current.valid || rows.length === 0) return []
-    const stages = rows.map((row) => row.rating.stageM)
+    const stages = rows.map((row) => row.rating.stageM as number)
     const min = Math.min(...stages)
     const max = Math.max(...stages)
     const step = (max - min) / 12 || 0.1
@@ -124,28 +128,14 @@ export function useRatingFit(initialLineNo = 'A'): UseRatingFitResult {
     })
   })
 
-  const overLimitRows = computed<RatingPointRow[]>(() => {
-    const limit = ratingStore.deviationLimitPct
-    return allFits.value.flatMap((item) =>
+  const overLimitRows = computed<RatingPointRow[]>(() =>
+    allFits.value.flatMap((item) =>
       ratings.value
-        .filter((rating) => rating.lineNo === item.lineNo)
-        .map((rating) => {
-          const predicted = item.valid ? curveFlow(item, rating.stageM) : 0
-          const residualPct =
-            item.valid && rating.flowM3s > 0
-              ? Number((((rating.flowM3s - predicted) / rating.flowM3s) * 100).toFixed(2))
-              : 0
-          return {
-            rating,
-            stationName: stationNameOf(rating.stationId),
-            curveFlowM3s: predicted,
-            residualPct,
-            fit: item
-          }
-        })
-        .filter((row) => Math.abs(row.residualPct) > limit)
+        .filter((rating) => rating.lineNo === item.lineNo && rating.stageM !== null)
+        .map((rating) => toRow(rating, item))
+        .filter((row) => Math.abs(row.residualPct) > ratingStore.deviationLimitPct)
     )
-  })
+  )
 
   const overLimitCompares = computed<Compare[]>(() =>
     compares.value.filter((compare) => compare.verdict === '超限')
@@ -156,10 +146,7 @@ export function useRatingFit(initialLineNo = 'A'): UseRatingFitResult {
   }
 
   function refit(): RatingFitResult {
-    const points = ratings.value
-      .filter((rating) => rating.lineNo === activeLineNo.value)
-      .map((rating) => ({ stageM: rating.stageM, flowM3s: rating.flowM3s }))
-    const result = fitPowerCurve(points, activeLineNo.value)
+    const result = fitPowerCurve(usablePoints(activeLineNo.value), activeLineNo.value)
     ratingStore.setFit(result)
     return result
   }

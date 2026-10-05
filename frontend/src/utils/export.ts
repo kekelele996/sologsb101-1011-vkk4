@@ -11,9 +11,19 @@ import {
   stampBackupTime,
   type BackupPayload
 } from '@/utils/db'
+import type { RatingVersion } from '@/types/rating'
 
 /** 备份集合键名 */
-export const BACKUP_KEYS = ['stations', 'sections', 'verticals', 'points', 'ratings', 'compares'] as const
+export const BACKUP_KEYS = [
+  'stations',
+  'stageSegments',
+  'sections',
+  'verticals',
+  'points',
+  'ratings',
+  'ratingVersions',
+  'compares'
+] as const
 export type BackupKey = (typeof BACKUP_KEYS)[number]
 
 /** 各表行数统计（导出页展示与导入结果回执共用） */
@@ -21,12 +31,14 @@ export type CountMap = Record<BackupKey, number>
 
 /** 组装当前本地数据的完整快照 */
 export async function buildBackupPayload(): Promise<BackupPayload> {
-  const [stations, sections, verticals, points, ratings, compares] = await Promise.all([
+  const [stations, stageSegments, sections, verticals, points, ratings, ratingVersions, compares] = await Promise.all([
     db.stations.toArray(),
+    db.stageSegments.toArray(),
     db.sections.toArray(),
     db.verticals.toArray(),
     db.points.toArray(),
     db.ratings.toArray(),
+    db.ratingVersions.toArray(),
     db.compares.toArray()
   ])
   return {
@@ -34,10 +46,12 @@ export async function buildBackupPayload(): Promise<BackupPayload> {
     dbVersion: DB_VERSION,
     exportedAt: new Date().toISOString(),
     stations,
+    stageSegments,
     sections,
     verticals,
     points,
     ratings,
+    ratingVersions,
     compares
   }
 }
@@ -61,10 +75,12 @@ export function validateBackup(input: unknown): { ok: boolean; errors: string[];
     dbVersion: typeof obj.dbVersion === 'number' ? obj.dbVersion : DB_VERSION,
     exportedAt: typeof obj.exportedAt === 'string' ? obj.exportedAt : new Date().toISOString(),
     stations: obj.stations ?? [],
+    stageSegments: obj.stageSegments ?? [],
     sections: obj.sections ?? [],
     verticals: obj.verticals ?? [],
     points: obj.points ?? [],
     ratings: obj.ratings ?? [],
+    ratingVersions: obj.ratingVersions ?? [],
     compares: obj.compares ?? []
   }
   return { ok: true, errors, payload }
@@ -74,10 +90,12 @@ export function validateBackup(input: unknown): { ok: boolean; errors: string[];
 export function countPayload(payload: BackupPayload): CountMap {
   return {
     stations: payload.stations.length,
+    stageSegments: payload.stageSegments.length,
     sections: payload.sections.length,
     verticals: payload.verticals.length,
     points: payload.points.length,
     ratings: payload.ratings.length,
+    ratingVersions: payload.ratingVersions.length,
     compares: payload.compares.length
   }
 }
@@ -116,13 +134,24 @@ export async function importBackup(payload: BackupPayload, overwrite: boolean): 
   if (overwrite) await clearAllTables()
   await db.transaction(
     'rw',
-    [db.stations, db.sections, db.verticals, db.points, db.ratings, db.compares],
+    [
+      db.stations,
+      db.stageSegments,
+      db.sections,
+      db.verticals,
+      db.points,
+      db.ratings,
+      db.ratingVersions,
+      db.compares
+    ],
     async () => {
       await db.stations.bulkPut(payload.stations)
+      await db.stageSegments.bulkPut(payload.stageSegments)
       await db.sections.bulkPut(payload.sections)
       await db.verticals.bulkPut(payload.verticals)
       await db.points.bulkPut(payload.points)
       await db.ratings.bulkPut(payload.ratings)
+      await db.ratingVersions.bulkPut(payload.ratingVersions)
       await db.compares.bulkPut(payload.compares)
     }
   )
@@ -132,6 +161,7 @@ export async function importBackup(payload: BackupPayload, overwrite: boolean): 
 /** 追加式导入：为导入数据重新分配 id，避免覆盖现有档案 */
 export function remapIds(payload: BackupPayload): BackupPayload {
   const stationMap = new Map<string, string>()
+  const segmentMap = new Map<string, string>()
   const sectionMap = new Map<string, string>()
   const verticalMap = new Map<string, string>()
   const ratingMap = new Map<string, string>()
@@ -141,10 +171,20 @@ export function remapIds(payload: BackupPayload): BackupPayload {
     stationMap.set(station.id, id)
     return { ...station, id }
   })
+  const stageSegments = payload.stageSegments.map((segment) => {
+    const id = createId('seg')
+    segmentMap.set(segment.id, id)
+    return { ...segment, id, stationId: stationMap.get(segment.stationId) ?? segment.stationId }
+  })
   const sections = payload.sections.map((section) => {
     const id = createId('sec')
     sectionMap.set(section.id, id)
-    return { ...section, id, stationId: stationMap.get(section.stationId) ?? section.stationId }
+    return {
+      ...section,
+      id,
+      stationId: stationMap.get(section.stationId) ?? section.stationId,
+      stageSegmentId: section.stageSegmentId ? segmentMap.get(section.stageSegmentId) ?? null : null
+    }
   })
   const verticals = payload.verticals.map((vertical) => {
     const id = createId('vrt')
@@ -159,28 +199,44 @@ export function remapIds(payload: BackupPayload): BackupPayload {
   const ratings = payload.ratings.map((rating) => {
     const id = createId('rat')
     ratingMap.set(rating.id, id)
-    return { ...rating, id, stationId: stationMap.get(rating.stationId) ?? rating.stationId }
+    return {
+      ...rating,
+      id,
+      stationId: stationMap.get(rating.stationId) ?? rating.stationId,
+      sourceSectionId: rating.sourceSectionId ? sectionMap.get(rating.sourceSectionId) ?? null : null,
+      stageSegmentId: rating.stageSegmentId ? segmentMap.get(rating.stageSegmentId) ?? null : null
+    }
+  })
+  const remapVersion = (version: RatingVersion): RatingVersion => ({
+    ...version,
+    id: createId('ver'),
+    stationId: stationMap.get(version.stationId) ?? version.stationId,
+    points: version.points.map((point) => ({
+      ...point,
+      ratingId: ratingMap.get(point.ratingId) ?? point.ratingId
+    }))
   })
   const compares = payload.compares.map((compare) => ({
     ...compare,
     id: createId('cmp'),
     ratingId: ratingMap.get(compare.ratingId) ?? compare.ratingId
   }))
-  return { ...payload, stations, sections, verticals, points, ratings, compares }
+  return { ...payload, stations, stageSegments, sections, verticals, points, ratings, ratingVersions: payload.ratingVersions.map(remapVersion), compares }
 }
 
 /**
- * 生成结论文本：按测站输出最新水位、断面测次、定线参数与超限点据。
- * 供导出页的「检测结论」区域使用。
+ * 生成结论文本：按测站输出最新已挂接水位、断面测次、工作定线、已定案版本与超限点据。
  */
 export interface ConclusionLine {
   stationId: string
   stationName: string
   river: string
   sectionCount: number
+  pendingCount: number
   latestStageM: number | null
   ratingCount: number
   overLimitCount: number
+  finalizedCount: number
   fitText: string
 }
 
@@ -191,28 +247,35 @@ export function buildConclusionLines(
   return payload.stations.map((station) => {
     const sections = payload.sections.filter((section) => section.stationId === station.id)
     const latest = sections.reduce<number | null>((acc, section) => {
-      if (acc === null) return section.stageM
-      return section.stageM > acc ? section.stageM : acc
+      if (section.linkedStageM === null) return acc
+      if (acc === null) return section.linkedStageM
+      return section.linkedStageM > acc ? section.linkedStageM : acc
     }, null)
     const ratings = payload.ratings.filter((rating) => rating.stationId === station.id)
     const ratingIds = new Set(ratings.map((rating) => rating.id))
     const overLimitCount = payload.compares.filter(
       (compare) => ratingIds.has(compare.ratingId) && compare.verdict === '超限'
     ).length
+    const pendingCount = ratings.filter((rating) => rating.stageM === null).length
     const lines = Array.from(new Set(ratings.map((rating) => rating.lineNo)))
     const fitParts = lines.map((lineNo) => {
       const fit = fits.find((item) => item.lineNo === lineNo)
-      if (!fit || !fit.valid) return `${lineNo} 线未定线`
-      return `${lineNo} 线 Q=${fit.a}·(H-${fit.h0})^${fit.b}，残差 ${fit.meanResidualPct}%（${fit.sampleCount} 点）`
+      if (!fit || !fit.valid) return `${lineNo} 工作线未定`
+      return `${lineNo} 工作线 Q=${fit.a}·(H-${fit.h0})^${fit.b}，残差 ${fit.meanResidualPct}%（${fit.sampleCount} 点）`
     })
+    const finalizedCount = payload.ratingVersions.filter(
+      (version) => version.stationId === station.id
+    ).length
     return {
       stationId: station.id,
       stationName: station.name,
       river: station.river,
       sectionCount: sections.length,
+      pendingCount,
       latestStageM: latest,
       ratingCount: ratings.length,
       overLimitCount,
+      finalizedCount,
       fitText: fitParts.length > 0 ? fitParts.join('；') : '暂无关系点据'
     }
   })

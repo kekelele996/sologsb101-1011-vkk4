@@ -13,6 +13,7 @@ import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import { useRatingStore } from '@/stores/ratingStore'
 import { useStationStore } from '@/stores/stationStore'
 import { useSectionStore } from '@/stores/sectionStore'
+import { useStageStore } from '@/stores/stageStore'
 import {
   DB_NAME,
   DB_VERSION,
@@ -37,6 +38,7 @@ import { fitPowerCurve } from '@/types/rating'
 const ratingStore = useRatingStore()
 const stationStore = useStationStore()
 const sectionStore = useSectionStore()
+const stageStore = useStageStore()
 
 const counts = ref<Record<string, number>>({})
 const lastBackupAt = ref<string | null>(null)
@@ -58,7 +60,9 @@ const conclusions = ref<
     sectionCount: number
     latestStageM: number | null
     ratingCount: number
+    pendingCount: number
     overLimitCount: number
+    finalizedCount: number
     fitText: string
   }>
 >([])
@@ -75,7 +79,8 @@ async function buildConclusions(): Promise<void> {
     fitPowerCurve(
       payload.ratings
         .filter((rating) => rating.lineNo === lineNo)
-        .map((rating) => ({ stageM: rating.stageM, flowM3s: rating.flowM3s })),
+        .filter((rating) => rating.stageM !== null)
+        .map((rating) => ({ stageM: rating.stageM as number, flowM3s: rating.flowM3s })),
       lineNo
     )
   )
@@ -179,8 +184,10 @@ onMounted(() => {
 
     <div class="gb-stats-row">
       <StatBadge label="测站" :value="counts.stations ?? 0" suffix="站" icon="Odometer" />
+      <StatBadge label="过程段" :value="counts.stageSegments ?? 0" suffix="段" icon="DataBoard" tone="info" />
       <StatBadge label="断面测次" :value="counts.sections ?? 0" suffix="次" icon="Files" tone="info" />
       <StatBadge label="流速测点" :value="counts.points ?? 0" suffix="点" icon="DataLine" tone="success" />
+      <StatBadge label="待补录点据" :value="ratingStore.pendingRatings.length" suffix="点" :tone="ratingStore.pendingRatings.length > 0 ? 'danger' : 'success'" icon="WarningFilled" />
       <StatBadge
         label="比测合格率"
         :value="ratingStore.fitQuality.qualifyRatePct"
@@ -215,6 +222,16 @@ onMounted(() => {
         <el-table-column label="点据数" width="90" align="right">
           <template #default="{ row }">
             <span class="gb-mono">{{ row.ratingCount }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="待补录" width="90" align="right">
+          <template #default="{ row }">
+            <span class="gb-mono" :class="{ 'page__danger': row.pendingCount > 0 }">{{ row.pendingCount }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="定案版本" width="100" align="right">
+          <template #default="{ row }">
+            <span class="gb-mono">{{ row.finalizedCount }}</span>
           </template>
         </el-table-column>
         <el-table-column label="超限" width="90" align="right">
@@ -290,7 +307,7 @@ onMounted(() => {
       <div class="gb-panel-title">
         <h3>全量 JSON 导入导出</h3>
         <span class="gb-hint">
-          导出内容包含 stations / sections / verticals / points / ratings / compares 六张表
+          导出内容包含 stations / stageSegments / sections / verticals / points / ratings / ratingVersions / compares 八张表
         </span>
       </div>
 
@@ -325,8 +342,11 @@ onMounted(() => {
       <el-descriptions :column="3" border size="small">
         <el-descriptions-item label="本地库名">{{ DB_NAME }}</el-descriptions-item>
         <el-descriptions-item label="结构版本">v{{ DB_VERSION }}</el-descriptions-item>
-        <el-descriptions-item label="测站 / 测次">
-          {{ counts.stations ?? 0 }} / {{ counts.sections ?? 0 }}
+        <el-descriptions-item label="测站 / 过程段">
+          {{ counts.stations ?? 0 }} / {{ counts.stageSegments ?? 0 }}
+        </el-descriptions-item>
+        <el-descriptions-item label="测次 / 定案">
+          {{ counts.sections ?? 0 }} / {{ counts.ratingVersions ?? 0 }}
         </el-descriptions-item>
         <el-descriptions-item label="垂线 / 测点">
           {{ counts.verticals ?? 0 }} / {{ counts.points ?? 0 }}

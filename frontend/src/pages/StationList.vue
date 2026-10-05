@@ -29,6 +29,7 @@ const form = reactive({
   river: '',
   catchmentKm2: 1000,
   sectionCode: '',
+  ratingLineNo: 'A',
   remark: ''
 })
 
@@ -114,6 +115,7 @@ function openCreate(): void {
   form.river = stationStore.riverOptions[0] ?? ''
   form.catchmentKm2 = 1000
   form.sectionCode = `CS-${String(stationStore.stations.length + 1).padStart(2, '0')}`
+  form.ratingLineNo = 'A'
   form.remark = ''
   dialogVisible.value = true
 }
@@ -124,6 +126,7 @@ function openEdit(station: Station): void {
   form.river = station.river
   form.catchmentKm2 = station.catchmentKm2
   form.sectionCode = station.sectionCode
+  form.ratingLineNo = station.ratingLineNo || 'A'
   form.remark = station.remark
   dialogVisible.value = true
 }
@@ -355,6 +358,9 @@ watch(
         </el-form-item>
         <el-form-item label="断面编号" required>
           <el-input v-model="form.sectionCode" placeholder="如：CS-LM-01" maxlength="24" />
+        </el-form-item>
+        <el-form-item label="默认定线号" required>
+          <el-input v-model="form.ratingLineNo" placeholder="如 A / B / C" maxlength="8" />
         </el-form-item>
         <el-form-item label="备注">
           <el-input v-model="form.remark" type="textarea" :rows="2" placeholder="测验方式、断面稳定性说明等" maxlength="120" />

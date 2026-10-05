@@ -1,18 +1,56 @@
-/** 水位流量关系点据：参与幂函数定线的实测点 */
+/** 水位流量关系点据：水位由测流断面挂接到水位过程段后取得 */
 export interface Rating {
   id: string
   /** 所属测站 */
   stationId: string
-  /** 水位（m） */
-  stageM: number
+  /**
+   * 点据水位（m）。挂接失败时为 null：点据保留但不得参与定线，
+   * 等水位站补齐过程段后，由巡测队重试或过程段更新时自动重取。
+   */
+  stageM: number | null
   /** 流量（m³/s） */
   flowM3s: number
-  /** 定线号：同一定线号的点据参与同一组拟合 */
+  /** 定线号：同一定线号的点据参与同一组工作拟合 */
   lineNo: string
   /** 点据来源测次号 */
   measureNo: string
-  /** 点据时间 */
+  /** 来源断面测次；补录水位后据此重新取值 */
+  sourceSectionId: string | null
+  /** 取得点据水位的水位过程段 */
+  stageSegmentId: string | null
+  /** 点据时间（取测流开始时刻） */
   measuredAt: string
+  createdAt: number
+  updatedAt: number
+}
+
+/** 定案定线的点据快照 */
+export interface RatingVersionPoint {
+  ratingId: string
+  stageM: number
+  flowM3s: number
+  measureNo: string
+  measuredAt: string
+  residualPct: number
+}
+
+/** 已经定案的定线版本：水位补录或点据改值均不改写这一版 */
+export interface RatingVersion {
+  id: string
+  stationId: string
+  lineNo: string
+  /** 定案版本号，如 A-v1 */
+  versionNo: string
+  a: number
+  b: number
+  h0: number
+  sampleCount: number
+  meanResidualPct: number
+  maxResidualPct: number
+  r2: number
+  points: RatingVersionPoint[]
+  finalizedAt: string
+  operator: string
   createdAt: number
   updatedAt: number
 }
@@ -46,6 +84,7 @@ export interface RatingFilterState {
   stationIds: string[]
   lineNos: string[]
   verdicts: Array<'合格' | '超限'>
+  includePending: boolean
 }
 
 export function createEmptyRatingFilter(): RatingFilterState {
@@ -53,7 +92,8 @@ export function createEmptyRatingFilter(): RatingFilterState {
     keyword: '',
     stationIds: [],
     lineNos: [],
-    verdicts: []
+    verdicts: [],
+    includePending: false
   }
 }
 
@@ -90,11 +130,12 @@ function fitWithBase(
  * 取平均相对残差最小的一组参数，避免「基线贴近最低水位」造成幂函数畸变。
  */
 export function fitPowerCurve(
-  points: Array<{ stageM: number; flowM3s: number }>,
+  points: Array<{ stageM: number | null; flowM3s: number }>,
   lineNo = 'A'
 ): RatingFitResult {
   const usable = points.filter(
-    (point) => Number.isFinite(point.stageM) && Number.isFinite(point.flowM3s) && point.flowM3s > 0
+    (point): point is { stageM: number; flowM3s: number } =>
+      point.stageM !== null && Number.isFinite(point.stageM) && Number.isFinite(point.flowM3s) && point.flowM3s > 0
   )
   const base: RatingFitResult = {
     lineNo,
@@ -109,7 +150,7 @@ export function fitPowerCurve(
     message: ''
   }
   if (usable.length < 3) {
-    return { ...base, message: '点据少于 3 个，无法定线（至少需要 3 个实测点）' }
+    return { ...base, message: '已挂接点据少于 3 个，无法定线（待补录水位的点据不参与拟合）' }
   }
   const stageMin = Math.min(...usable.map((point) => point.stageM))
   const stageMax = Math.max(...usable.map((point) => point.stageM))
@@ -154,7 +195,7 @@ export function fitPowerCurve(
     maxResidualPct: Number(Math.max(...best.residuals).toFixed(2)),
     r2,
     valid,
-    message: valid ? '定线有效' : '指数 b ≤ 0，点据趋势异常，请检查水位与流量的对应关系'
+    message: valid ? '工作定线有效' : '指数 b ≤ 0，点据趋势异常，请检查水位与流量的对应关系'
   }
 }
 

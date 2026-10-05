@@ -1,6 +1,6 @@
 /**
- * 断面 store：维护断面测次、垂线集合、测点缓存与录入草稿。
- * 垂线排序按起点距升序，页面展示与流量计算共用同一顺序。
+ * 断面 store：维护巡测队断面测次、垂线集合、测点缓存与录入草稿。
+ * 点据水位不允许手填，只通过测流时段与水位站过程段对账取得。
  */
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
@@ -10,6 +10,7 @@ import { createEmptySectionFilter, type SectionFilterState } from '@/types/secti
 import type { Vertical } from '@/types/vertical'
 import { buildRelativeDepths } from '@/types/vertical'
 import type { Point } from '@/types/point'
+import { reconcileSectionById } from '@/utils/stageLink'
 
 /** 垂线录入草稿（新增/编辑表单共享结构） */
 export interface VerticalDraft {
@@ -28,6 +29,18 @@ export interface PointDraft {
   weight: number
   durationS: number
 }
+
+export type SectionCreatePayload = Omit<
+  Section,
+  | 'id'
+  | 'createdAt'
+  | 'updatedAt'
+  | 'linkedStageM'
+  | 'stageSegmentId'
+  | 'linkOk'
+  | 'linkReason'
+  | 'reconciledAt'
+>
 
 export function createEmptyVerticalDraft(nextNo = 1): VerticalDraft {
   return { no: nextNo, startDistanceM: 0, depthM: 1, bedNote: '', pointCount: 2 }
@@ -69,12 +82,12 @@ export const useSectionStore = defineStore('section', () => {
     })
   }
 
-  /** 某测站下的断面测次（按测流时间倒序） */
+  /** 某测站下的断面测次（按测流开始时间倒序） */
   function sectionsOfStation(stationId: string | null | undefined): Section[] {
     if (!stationId) return []
     return sections.value
       .filter((section) => section.stationId === stationId)
-      .sort((a, b) => Date.parse(b.measuredAt) - Date.parse(a.measuredAt))
+      .sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt))
   }
 
   /** 按筛选条件过滤某测站的断面 */
@@ -88,10 +101,11 @@ export const useSectionStore = defineStore('section', () => {
           if (!haystack.includes(keyword)) return false
         }
         if (filter.value.methods.length > 0 && !filter.value.methods.includes(section.method)) return false
-        if (filter.value.minStageM !== null && section.stageM < filter.value.minStageM) return false
+        if (filter.value.minStageM !== null && (section.linkedStageM ?? -Infinity) < filter.value.minStageM) return false
+        if (filter.value.pendingOnly && section.linkOk) return false
         return true
       })
-      .sort((a, b) => Date.parse(b.measuredAt) - Date.parse(a.measuredAt))
+      .sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt))
   )
 
   const sectionById = (id: string | null | undefined): Section | null =>
@@ -178,28 +192,79 @@ export const useSectionStore = defineStore('section', () => {
 
   /* ------------------------------ 断面测次 ------------------------------ */
 
-  async function createSection(
-    payload: Omit<Section, 'id' | 'createdAt' | 'updatedAt'>
-  ): Promise<Section> {
+  async function createSection(payload: SectionCreatePayload): Promise<Section> {
     const now = Date.now()
-    const row: Section = { ...payload, id: createId('sec'), createdAt: now, updatedAt: now }
-    await db.sections.put(row)
-    return row
+    const row: Section = {
+      ...payload,
+      linkedStageM: null,
+      stageSegmentId: null,
+      linkOk: false,
+      linkReason: '缺少覆盖测流时段的水位过程段',
+      reconciledAt: null,
+      id: createId('sec'),
+      createdAt: now,
+      updatedAt: now
+    }
+    const station = await db.stations.get(payload.stationId)
+    await db.transaction('rw', [db.sections, db.ratings], async () => {
+      await db.sections.put(row)
+      await db.ratings.put({
+        id: createId('rat'),
+        stationId: row.stationId,
+        stageM: null,
+        flowM3s: row.measuredFlowM3s ?? 0,
+        lineNo: station?.ratingLineNo || 'A',
+        measureNo: row.measureNo,
+        sourceSectionId: row.id,
+        stageSegmentId: null,
+        measuredAt: row.startedAt,
+        createdAt: now,
+        updatedAt: now
+      })
+    })
+    return reconcileSectionById(row.id)
   }
 
-  async function updateSection(id: string, patch: Partial<Section>): Promise<void> {
+  async function updateSection(id: string, patch: Partial<Section>): Promise<Section> {
     await db.sections.update(id, { ...patch, updatedAt: Date.now() } as never)
+    const section = await db.sections.get(id)
+    if (section) {
+      await db.ratings
+        .where('sourceSectionId')
+        .equals(id)
+        .modify((rating) => {
+          rating.measureNo = section.measureNo
+          rating.measuredAt = section.startedAt
+          rating.flowM3s = section.measuredFlowM3s ?? rating.flowM3s
+          rating.updatedAt = Date.now()
+        })
+    }
+    return reconcileSectionById(id)
+  }
+
+  /** 巡测队手动重试挂接；水位过程段保持只读，不做任何修改 */
+  async function retrySectionLink(id: string): Promise<Section> {
+    return reconcileSectionById(id)
   }
 
   async function removeSection(id: string): Promise<void> {
-    await db.transaction('rw', [db.sections, db.verticals, db.points], async () => {
-      const verticalIds = (await db.verticals.where('sectionId').equals(id).toArray()).map((row) => row.id)
-      if (verticalIds.length > 0) {
-        await db.points.where('verticalId').anyOf(verticalIds).delete()
-        await db.verticals.bulkDelete(verticalIds)
+    await db.transaction(
+      'rw',
+      [db.sections, db.verticals, db.points, db.ratings, db.compares],
+      async () => {
+        const verticalIds = (await db.verticals.where('sectionId').equals(id).toArray()).map((row) => row.id)
+        if (verticalIds.length > 0) {
+          await db.points.where('verticalId').anyOf(verticalIds).delete()
+          await db.verticals.bulkDelete(verticalIds)
+        }
+        const ratingIds = (await db.ratings.where('sourceSectionId').equals(id).toArray()).map((row) => row.id)
+        if (ratingIds.length > 0) {
+          await db.compares.where('ratingId').anyOf(ratingIds).delete()
+          await db.ratings.bulkDelete(ratingIds)
+        }
+        await db.sections.delete(id)
       }
-      await db.sections.delete(id)
-    })
+    )
   }
 
   /* ------------------------------- 垂线 ------------------------------- */
@@ -318,7 +383,7 @@ export const useSectionStore = defineStore('section', () => {
     }))
     await db.transaction('rw', [db.verticals, db.points], async () => {
       await db.points.where('verticalId').equals(verticalId).delete()
-      await db.points.bulkPut(records)
+      if (rows.length > 0) await db.points.bulkPut(records)
       await db.verticals.update(verticalId, { pointCount: records.length, updatedAt: now } as never)
     })
     return records.length
@@ -368,6 +433,7 @@ export const useSectionStore = defineStore('section', () => {
     resetPointDraft,
     createSection,
     updateSection,
+    retrySectionLink,
     removeSection,
     createVertical,
     updateVertical,
